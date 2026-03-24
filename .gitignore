@@ -1,0 +1,20 @@
+# 环境变量（含密钥，勿提交）
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# 依赖
+node_modules/
+backend/node_modules/
+
+# 构建产物
+dist/
+backend/dist/
+
+# 数据库文件
+backend/data/
+
+# 日志与缓存
+*.log
+.cache/
