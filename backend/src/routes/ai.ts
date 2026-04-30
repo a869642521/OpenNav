@@ -13,6 +13,46 @@ const BRAVE_TIMEOUT_MS = 10_000
 const router = Router()
 router.use(requireAuth)
 
+type AiQuotaFeature = 'summary' | 'similar'
+type AiQuotaError = Error & {
+  status?: number
+  expose?: boolean
+  quota?: { limit: number; used: number; remaining: number }
+}
+
+const AI_DAILY_LIMITS: Record<AiQuotaFeature, number> = {
+  summary: 5,
+  similar: 3,
+}
+
+function currentUsageDate(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function consumeDailyAiQuota(userId: string, feature: AiQuotaFeature): { limit: number; used: number; remaining: number } {
+  const limit = AI_DAILY_LIMITS[feature]
+  const usageDate = currentUsageDate()
+  const row = db
+    .prepare('SELECT count FROM ai_daily_usage WHERE user_id = ? AND feature = ? AND usage_date = ?')
+    .get(userId, feature, usageDate) as { count: number } | undefined
+  const used = row?.count ?? 0
+  if (used >= limit) {
+    const err = new Error(`今日 ${feature === 'summary' ? 'AI 总结' : '相似网站推荐'} 免费额度已用完（${limit} 次/天）`) as AiQuotaError
+    err.status = 429
+    err.expose = true
+    err.quota = { limit, used, remaining: 0 }
+    throw err
+  }
+  db.prepare(`
+    INSERT INTO ai_daily_usage (user_id, feature, usage_date, count, updated_at)
+    VALUES (?, ?, ?, 1, datetime('now'))
+    ON CONFLICT(user_id, feature, usage_date)
+    DO UPDATE SET count = count + 1, updated_at = datetime('now')
+  `).run(userId, feature, usageDate)
+  const nextUsed = used + 1
+  return { limit, used: nextUsed, remaining: Math.max(0, limit - nextUsed) }
+}
+
 /**
  * Kimi 接入协议说明（通过环境变量 KIMI_API_BASE_URL 配置）：
  *
@@ -55,15 +95,15 @@ function resolveKimiModel(protocol: 'openai' | 'anthropic'): string {
   return protocol === 'anthropic' ? 'kimi-k2.5' : 'moonshot-v1-8k'
 }
 
-/** 获取当前登录用户的 Kimi API Key（DB 中为密文），未配置 / 解密失败均抛 403 */
+/** 获取 Kimi API Key：用户自带 Key 优先，未配置则回退到平台环境变量。 */
 function getUserKimiKey(req: AuthRequest): string {
   const userId = req.user!.userId
   const row = db
     .prepare('SELECT kimi_api_key FROM users WHERE id = ?')
     .get(userId) as { kimi_api_key: string | null } | undefined
-  const plain = decryptSecret(row?.kimi_api_key)
+  const plain = decryptSecret(row?.kimi_api_key)?.trim() || process.env.KIMI_API_KEY?.trim() || ''
   if (!plain) {
-    const err = new Error('请先在「设置」中配置你的 Kimi API Key')
+    const err = new Error('请先在「设置」中配置你的 Kimi API Key，或联系站点管理员配置平台 KIMI_API_KEY')
     ;(err as Error & { status?: number }).status = 403
     throw err
   }
@@ -304,6 +344,7 @@ function dedupeSimilarSitesByHostname(
 router.post('/similar', validateBody(aiSiteSchema), async (req: AuthRequest, res, next) => {
   try {
     const apiKey = getUserKimiKey(req)
+    const quota = consumeDailyAiQuota(req.user!.userId, 'similar')
     const { name, url, description, lang } = req.body as { name: string; url: string; description?: string; lang?: string }
     const isChinese = lang !== 'en'
     const langInstruction = isChinese
@@ -334,19 +375,25 @@ router.post('/similar', validateBody(aiSiteSchema), async (req: AuthRequest, res
       return
     }
     const result = dedupeSimilarSitesByHostname(parsed).slice(0, 20)
+    res.setHeader('X-AI-Quota-Limit', String(quota.limit))
+    res.setHeader('X-AI-Quota-Remaining', String(quota.remaining))
     res.json(result)
   } catch (err) {
     if (err instanceof FetchTimeoutError) {
       res.status(504).json({ error: 'Kimi 接口请求超时，请稍后重试' })
       return
     }
-    const e = err as Error & { status?: number }
+    const e = err as AiQuotaError
     if (e.status === 403) {
       res.status(403).json({ error: e.message, needConfig: true })
       return
     }
     if (e.status === 400 || e.status === 502) {
       res.status(e.status).json({ error: e.message })
+      return
+    }
+    if (e.status === 429) {
+      res.status(429).json({ error: e.message, quota: e.quota })
       return
     }
     if (err instanceof SyntaxError) {
@@ -390,7 +437,7 @@ router.post('/resources', validateBody(aiSiteSchema), async (req: AuthRequest, r
       res.status(504).json({ error: 'Kimi 接口请求超时，请稍后重试' })
       return
     }
-    const e = err as Error & { status?: number }
+    const e = err as AiQuotaError
     if (e.status === 403) {
       res.status(403).json({ error: e.message, needConfig: true })
       return
@@ -498,7 +545,7 @@ router.post('/library-search', validateBody(aiLibrarySearchSchema), async (req: 
       res.status(504).json({ error: 'Brave Search 请求超时，请稍后重试' })
       return
     }
-    const e = err as Error & { status?: number }
+    const e = err as AiQuotaError
     if (e.status === 402) {
       res.status(402).json({ error: e.message, needConfig: true })
       return
@@ -511,6 +558,7 @@ router.post('/library-search', validateBody(aiLibrarySearchSchema), async (req: 
 router.post('/summary', validateBody(aiSiteSchema), async (req: AuthRequest, res, next) => {
   try {
     const apiKey = getUserKimiKey(req)
+    const quota = consumeDailyAiQuota(req.user!.userId, 'summary')
     const { name, url, description, lang } = req.body as { name: string; url: string; description?: string; lang?: string }
     const isChinese = lang !== 'en'
     const langInstruction = isChinese
@@ -538,19 +586,25 @@ router.post('/summary', validateBody(aiSiteSchema), async (req: AuthRequest, res
 }`
     const raw = await callKimi(prompt, apiKey)
     const result = parseAiJson(raw)
+    res.setHeader('X-AI-Quota-Limit', String(quota.limit))
+    res.setHeader('X-AI-Quota-Remaining', String(quota.remaining))
     res.json(result)
   } catch (err) {
     if (err instanceof FetchTimeoutError) {
       res.status(504).json({ error: 'Kimi 接口请求超时，请稍后重试' })
       return
     }
-    const e = err as Error & { status?: number }
+    const e = err as AiQuotaError
     if (e.status === 403) {
       res.status(403).json({ error: e.message, needConfig: true })
       return
     }
     if (e.status === 400 || e.status === 502) {
       res.status(e.status).json({ error: e.message })
+      return
+    }
+    if (e.status === 429) {
+      res.status(429).json({ error: e.message, quota: e.quota })
       return
     }
     if (err instanceof SyntaxError) {

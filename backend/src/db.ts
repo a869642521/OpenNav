@@ -103,6 +103,14 @@ db.exec(`
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS ai_daily_usage (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    feature TEXT NOT NULL,
+    usage_date TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, feature, usage_date)
+  );
 `)
 
 db.exec(`
@@ -120,6 +128,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_phone_otps_expires ON phone_otps(expires_at);
   CREATE INDEX IF NOT EXISTS idx_qq_oauth_states_expires ON qq_oauth_states(expires_at);
   CREATE INDEX IF NOT EXISTS idx_auth_exchanges_expires ON auth_exchanges(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_ai_daily_usage_date ON ai_daily_usage(usage_date);
 `)
 
 /** 清理所有已过期的 OTP / OAuth state / 一次性换取码 */
