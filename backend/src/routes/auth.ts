@@ -379,7 +379,11 @@ router.get(
     const exp = Date.now() + 10 * 60 * 1000
     db.prepare('INSERT INTO qq_oauth_states (state, expires_at) VALUES (?, ?)').run(state, exp)
     const redirectUri = encodeURIComponent(`${BACKEND_PUBLIC_URL()}/auth/qq/callback`)
-    const url = `https://graph.qq.com/oauth2.0/authorize?response_type=code&client_id=${appId}&redirect_uri=${redirectUri}&state=${state}`
+    // 必须申请 get_user_info 权限，否则回调里拉头像/昵称会失败（ret≠0）
+    const scope = encodeURIComponent('get_user_info')
+    const url =
+      `https://graph.qq.com/oauth2.0/authorize?response_type=code` +
+      `&client_id=${appId}&redirect_uri=${redirectUri}&state=${state}&scope=${scope}`
     res.redirect(url)
   }
 )
@@ -440,9 +444,19 @@ router.get('/qq/callback', async (req, res, next) => {
       `https://graph.qq.com/user/get_user_info?access_token=${encodeURIComponent(at)}` +
       `&oauth_consumer_key=${encodeURIComponent(appId)}&openid=${encodeURIComponent(openid)}`
     const infoRes = await fetchWithTimeout(infoUrl, { timeoutMs: QQ_TIMEOUT_MS })
-    const info = (await infoRes.json()) as { nickname?: string; figureurl_qq_2?: string; ret?: number }
-    const nickname = info.nickname?.trim() || `QQ用户${openid.slice(0, 6)}`
-    const avatar = info.figureurl_qq_2 || undefined
+    const info = (await infoRes.json()) as {
+      nickname?: string
+      figureurl_qq_2?: string
+      ret?: number
+      msg?: string
+    }
+    const okUserInfo = info.ret === undefined || info.ret === 0
+    if (!okUserInfo) {
+      console.warn('[qq] get_user_info failed', { ret: info.ret, msg: info.msg })
+    }
+    const nickname =
+      okUserInfo && info.nickname?.trim() ? info.nickname.trim() : `QQ用户${openid.slice(0, 6)}`
+    const avatar = okUserInfo ? info.figureurl_qq_2 || undefined : undefined
     const email = `qq_${openid}@qq.user`
 
     let userRow = db.prepare('SELECT id, email, name, avatar FROM users WHERE qq_openid = ?').get(openid) as
