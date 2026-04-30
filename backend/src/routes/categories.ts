@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { requireAuth, type AuthRequest } from '../middleware.js'
 import { db } from '../db.js'
+import { validateBody, categoryCreateSchema } from '../validate.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -20,12 +21,18 @@ router.get('/', (req: AuthRequest, res) => {
   res.json([...BUILTIN_CATEGORIES, ...custom])
 })
 
-/** POST /categories — 新建分组 */
-router.post('/', (req: AuthRequest, res) => {
+/** POST /categories — 新建分组（同名则复用已有，避免登录迁移等场景堆叠重复 Tab） */
+router.post('/', validateBody(categoryCreateSchema), (req: AuthRequest, res) => {
   const userId = req.user!.userId
-  const { name } = req.body as { name?: string }
-  if (!name?.trim()) {
-    res.status(400).json({ error: '分组名不能为空' })
+  const { name } = req.body as { name: string }
+  const trimmed = name
+  const existing = db
+    .prepare(
+      'SELECT id, name, sort_order FROM categories WHERE user_id = ? AND lower(trim(name)) = lower(?)'
+    )
+    .get(userId, trimmed) as { id: string; name: string; sort_order: number } | undefined
+  if (existing) {
+    res.status(200).json({ id: existing.id, name: existing.name, sort_order: existing.sort_order })
     return
   }
   const maxOrder = (db
@@ -33,9 +40,9 @@ router.post('/', (req: AuthRequest, res) => {
     .get(userId) as { m: number | null }).m ?? 0
   const id = `cat_${Date.now()}`
   db.prepare('INSERT INTO categories (id, user_id, name, sort_order) VALUES (?, ?, ?, ?)').run(
-    id, userId, name.trim(), maxOrder + 1
+    id, userId, trimmed, maxOrder + 1
   )
-  res.status(201).json({ id, name: name.trim(), sort_order: maxOrder + 1 })
+  res.status(201).json({ id, name: trimmed, sort_order: maxOrder + 1 })
 })
 
 /** DELETE /categories/:id — 删除分组，分组下站点归 ungrouped */

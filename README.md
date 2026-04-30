@@ -55,6 +55,11 @@ cp .env.example .env
 | `PORT` | 端口 | 默认 `3001` |
 | `FRONTEND_URL` | 前端地址（CORS） | 开发填 `http://localhost:5173`，上线填前端域名 |
 
+**生产环境：登录方式**  
+前端默认使用**邮箱验证码登录**：`POST /auth/email/otp/send` 发信、`POST /auth/email/otp/verify` 换 token；新用户在验证成功时自动建号。须配置 `SMTP_*`（见 `backend/.env.example`），或开发/联调时使用 `EMAIL_OTP_DEBUG=1`。  
+仍支持密码方式：`POST /auth/email/register`、`POST /auth/email/login`。  
+（可选）**手机验证码**登录对接 `POST /auth/phone/send` 等，并配置腾讯云短信变量。
+
 ---
 
 ### 3. 安装依赖并启动
@@ -112,3 +117,9 @@ npm run dev
 - 生产环境必须使用 HTTPS
 - 生产环境务必更换 `JWT_SECRET` 为随机强密钥
 - Kimi API Key 只放在后端 `.env`，不要出现在前端
+
+---
+
+## 五、架构约定（扩展友好）
+
+计划日后做 Chrome 扩展时，开发上请保持：**业务走 `src/api.ts` + Bearer JWT**、**API 地址用环境变量**、**第三方 Key 只走后端**、**UI 不假设只有全屏网页**。详细条目见项目内 Cursor 规则 **extension-friendly**（`.cursor/rules/extension-friendly.mdc`），协作与 AI 辅助时会自动参考。

@@ -1,5 +1,7 @@
 // ==================== API 客户端 ====================
-// 封装对后端 REST API 的所有调用，统一附带 JWT
+// 封装对后端 REST API 的所有调用，统一附带 JWT。
+// 扩展友好：新功能优先走本文件；API 根地址仅用 VITE_API_URL；鉴权用 Bearer。
+// 若日后 Chrome 扩展等无法使用 localStorage，可将 getToken 抽成可注入实现，避免复制 fetch 逻辑。
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:3001'
 
@@ -18,7 +20,18 @@ async function request<T>(
   }
   if (token) headers['Authorization'] = `Bearer ${token}`
 
-  const res = await fetch(`${BASE_URL}${path}`, { ...options, headers })
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}${path}`, { ...options, headers })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg === 'Failed to fetch' || msg.includes('NetworkError') || msg.includes('Load failed')) {
+      throw new Error(
+        `无法连接后端（${BASE_URL}）。请确认：1）已在 backend 目录执行 npm run dev；2）端口与 VITE_API_URL 一致；3）QQ 等登录回调需在 backend 的 FRONTEND_URL 与浏览器地址一致。`
+      )
+    }
+    throw e
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText })) as { error?: string }
     throw new Error(body.error ?? `HTTP ${res.status}`)
@@ -70,6 +83,28 @@ export interface AiResourceResult {
   links: { title: string; url: string }[]
 }
 
+export interface LibraryLink {
+  title: string
+  url: string
+  source: 'ai' | 'manual' | 'search'
+  addedAt: string
+  note?: string
+  description?: string
+  searchRank?: number
+}
+
+export interface SiteLearningLibrary {
+  version: 1
+  summary: string
+  links: LibraryLink[]
+}
+
+export interface BraveSearchItem {
+  title: string
+  url: string
+  description: string
+}
+
 export interface AiSummaryResult {
   overview: string
   architecture: string
@@ -87,10 +122,52 @@ export interface AiSummaryResult {
 
 // ==================== Auth ====================
 
-export async function apiGoogleLogin(credential: string): Promise<{ token: string; user: ApiUser }> {
-  return request('/auth/google', {
+export async function apiRegisterEmail(
+  email: string,
+  password: string,
+  name?: string
+): Promise<{ token: string; user: ApiUser }> {
+  return request('/auth/email/register', {
     method: 'POST',
-    body: JSON.stringify({ credential }),
+    body: JSON.stringify({ email, password, name }),
+  })
+}
+
+export async function apiLoginEmail(
+  email: string,
+  password: string
+): Promise<{ token: string; user: ApiUser }> {
+  return request('/auth/email/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  })
+}
+
+export async function apiSendEmailOtp(email: string): Promise<{
+  ok: boolean
+  message?: string
+  debugCode?: string
+}> {
+  return request('/auth/email/otp/send', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}
+
+export async function apiVerifyEmailOtp(
+  email: string,
+  code: string
+): Promise<{ token: string; user: ApiUser }> {
+  return request('/auth/email/otp/verify', {
+    method: 'POST',
+    body: JSON.stringify({ email, code }),
+  })
+}
+
+export async function apiExchangeAuthCode(code: string): Promise<{ token: string; user: ApiUser }> {
+  return request('/auth/exchange', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
   })
 }
 
@@ -147,31 +224,65 @@ export async function apiGetKimiKeyStatus(): Promise<{ configured: boolean }> {
   return request('/settings/kimi-key-status')
 }
 
+export async function apiUpdateBraveKey(key: string): Promise<void> {
+  return request('/settings/brave-key', {
+    method: 'PUT',
+    body: JSON.stringify({ key }),
+  })
+}
+
+export async function apiGetBraveKeyStatus(): Promise<{ configured: boolean }> {
+  return request('/settings/brave-key-status')
+}
+
 // ==================== AI ====================
 
 export async function apiAiSimilar(
-  name: string, url: string, description: string
+  name: string,
+  url: string,
+  description: string,
+  options?: { signal?: AbortSignal; lang?: string }
 ): Promise<AiSimilarSite[]> {
   return request('/ai/similar', {
     method: 'POST',
-    body: JSON.stringify({ name, url, description }),
+    body: JSON.stringify({ name, url, description, lang: options?.lang }),
+    signal: options?.signal,
   })
 }
 
 export async function apiAiResources(
-  name: string, url: string, description: string
+  name: string,
+  url: string,
+  description: string,
+  options?: { signal?: AbortSignal; lang?: string }
 ): Promise<AiResourceResult> {
   return request('/ai/resources', {
     method: 'POST',
-    body: JSON.stringify({ name, url, description }),
+    body: JSON.stringify({ name, url, description, lang: options?.lang }),
+    signal: options?.signal,
   })
 }
 
 export async function apiAiSummary(
-  name: string, url: string, description: string
+  name: string,
+  url: string,
+  description: string,
+  options?: { signal?: AbortSignal; lang?: string }
 ): Promise<AiSummaryResult> {
   return request('/ai/summary', {
     method: 'POST',
-    body: JSON.stringify({ name, url, description }),
+    body: JSON.stringify({ name, url, description, lang: options?.lang }),
+    signal: options?.signal,
+  })
+}
+
+export async function apiLibrarySearch(
+  query: string,
+  options?: { signal?: AbortSignal; lang?: 'zh' | 'en'; siteName?: string }
+): Promise<BraveSearchItem[]> {
+  return request('/ai/library-search', {
+    method: 'POST',
+    body: JSON.stringify({ query, lang: options?.lang, siteName: options?.siteName }),
+    signal: options?.signal,
   })
 }

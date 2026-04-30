@@ -69,7 +69,7 @@ export async function findSimilarSites(
 网站地址：${siteUrl}
 网站描述：${siteDescription || '无'}
 
-请分析上述网站的类型和定位，然后推荐 5 个同类型的优质网站。
+请分析上述网站的类型和定位，然后推荐恰好 20 个同类型的优质网站（JSON 数组长度必须为 20）。
 要求：
 1. 推荐真实存在、可访问的知名网站
 2. 每个网站给出一句话推荐理由
@@ -83,7 +83,7 @@ export async function findSimilarSites(
   try {
     const parsed = JSON.parse(extractJson(raw)) as AiSimilarSite[]
     if (!Array.isArray(parsed)) throw new Error('返回格式错误')
-    return parsed.slice(0, 5).map(item => ({
+    return parsed.slice(0, 20).map(item => ({
       name: String(item.name ?? ''),
       url: String(item.url ?? ''),
       reason: String(item.reason ?? ''),

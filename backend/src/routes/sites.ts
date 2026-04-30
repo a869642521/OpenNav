@@ -1,6 +1,25 @@
+import { randomUUID } from 'crypto'
 import { Router } from 'express'
 import { requireAuth, type AuthRequest } from '../middleware.js'
 import { db } from '../db.js'
+import {
+  validateBody,
+  siteCreateSchema,
+  sitePatchSchema,
+  siteReorderSchema,
+} from '../validate.js'
+
+const BUILTIN_CATEGORY_IDS = new Set(['all', 'favorites', 'ungrouped'])
+
+/** 校验 category 要么是内置，要么属于当前用户；否则回落到 ungrouped */
+function resolveUserCategory(userId: string, category: string | undefined | null): string {
+  const c = (category ?? '').trim()
+  if (!c || BUILTIN_CATEGORY_IDS.has(c)) return c || 'ungrouped'
+  const owned = db
+    .prepare('SELECT id FROM categories WHERE id = ? AND user_id = ?')
+    .get(c, userId) as { id: string } | undefined
+  return owned ? c : 'ungrouped'
+}
 
 const router = Router()
 router.use(requireAuth)
@@ -24,6 +43,16 @@ interface SiteRow {
   sort_order: number
 }
 
+function parseTagsColumn(raw: string): string[] {
+  try {
+    const v = JSON.parse(raw || '[]')
+    if (!Array.isArray(v)) return []
+    return v.filter((x): x is string => typeof x === 'string')
+  } catch {
+    return []
+  }
+}
+
 function rowToSite(row: SiteRow) {
   return {
     id: row.id,
@@ -31,7 +60,7 @@ function rowToSite(row: SiteRow) {
     name: row.name,
     url: row.url,
     category: row.category,
-    tags: JSON.parse(row.tags || '[]'),
+    tags: parseTagsColumn(row.tags),
     notes: row.notes,
     description: row.description,
     isFollowed: Boolean(row.is_followed),
@@ -54,23 +83,15 @@ router.get('/', (req: AuthRequest, res) => {
 })
 
 /** POST /sites — 新增站点 */
-router.post('/', (req: AuthRequest, res) => {
+router.post('/', validateBody(siteCreateSchema), (req: AuthRequest, res) => {
   const userId = req.user!.userId
-  const body = req.body as {
-    id?: string; favicon?: string; name?: string; url?: string;
-    category?: string; tags?: string[]; notes?: string; description?: string;
-    isFollowed?: boolean; isFavorite?: boolean; views?: number; likes?: number;
-    createdAt?: string; lastOpenedAt?: string; sortOrder?: number;
-  }
-  if (!body.name?.trim() || !body.url?.trim()) {
-    res.status(400).json({ error: '缺少必填字段 name 或 url' })
-    return
-  }
+  const body = req.body as import('zod').infer<typeof siteCreateSchema>
   const maxOrder = (db
     .prepare('SELECT MAX(sort_order) as m FROM sites WHERE user_id = ?')
     .get(userId) as { m: number | null }).m ?? 0
-  const id = body.id ?? `site_${Date.now()}`
+  const id = body.id?.trim() || randomUUID()
   const now = new Date().toISOString()
+  const category = resolveUserCategory(userId, body.category)
   db.prepare(`
     INSERT INTO sites
       (id, user_id, favicon, name, url, category, tags, notes, description,
@@ -79,9 +100,9 @@ router.post('/', (req: AuthRequest, res) => {
   `).run(
     id, userId,
     body.favicon ?? '',
-    body.name.trim(),
-    body.url.trim(),
-    body.category ?? 'ungrouped',
+    body.name,
+    body.url,
+    category,
     JSON.stringify(body.tags ?? []),
     body.notes ?? '',
     body.description ?? '',
@@ -93,16 +114,20 @@ router.post('/', (req: AuthRequest, res) => {
     body.lastOpenedAt ?? null,
     body.sortOrder ?? maxOrder + 1,
   )
-  const row = db.prepare('SELECT * FROM sites WHERE id = ?').get(id) as SiteRow
+  const row = db.prepare('SELECT * FROM sites WHERE id = ? AND user_id = ?').get(id, userId) as SiteRow
   res.status(201).json(rowToSite(row))
 })
 
 /** PATCH /sites/reorder — 批量更新顺序（需在 /:id 路由前注册） */
-router.patch('/reorder', (req: AuthRequest, res) => {
+router.patch('/reorder', validateBody(siteReorderSchema), (req: AuthRequest, res) => {
   const userId = req.user!.userId
-  const { orderedIds } = req.body as { orderedIds?: string[] }
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ error: '需要 orderedIds 数组' })
+  const { orderedIds } = req.body as { orderedIds: string[] }
+  const ownedIds = new Set(
+    (db.prepare('SELECT id FROM sites WHERE user_id = ?').all(userId) as { id: string }[]).map((row) => row.id)
+  )
+  const invalidIds = orderedIds.filter((id) => !ownedIds.has(id))
+  if (invalidIds.length > 0) {
+    res.status(400).json({ error: 'orderedIds 包含不属于当前用户的站点', invalidIds })
     return
   }
   const update = db.prepare('UPDATE sites SET sort_order = ? WHERE id = ? AND user_id = ?')
@@ -113,7 +138,7 @@ router.patch('/reorder', (req: AuthRequest, res) => {
 })
 
 /** PATCH /sites/:id — 更新站点字段 */
-router.patch('/:id', (req: AuthRequest, res) => {
+router.patch('/:id', validateBody(sitePatchSchema), (req: AuthRequest, res) => {
   const userId = req.user!.userId
   const { id } = req.params
   const row = db.prepare('SELECT * FROM sites WHERE id = ? AND user_id = ?').get(id, userId) as SiteRow | undefined
@@ -121,12 +146,9 @@ router.patch('/:id', (req: AuthRequest, res) => {
     res.status(404).json({ error: '站点不存在' })
     return
   }
-  const body = req.body as Partial<{
-    favicon: string; name: string; url: string; category: string;
-    tags: string[]; notes: string; description: string;
-    isFollowed: boolean; isFavorite: boolean; views: number; likes: number;
-    lastOpenedAt: string | null;
-  }>
+  const body = req.body as import('zod').infer<typeof sitePatchSchema>
+  const category =
+    body.category !== undefined ? resolveUserCategory(userId, body.category) : row.category
 
   db.prepare(`
     UPDATE sites SET
@@ -138,7 +160,7 @@ router.patch('/:id', (req: AuthRequest, res) => {
     body.favicon ?? row.favicon,
     body.name ?? row.name,
     body.url ?? row.url,
-    body.category ?? row.category,
+    category,
     body.tags !== undefined ? JSON.stringify(body.tags) : row.tags,
     body.notes ?? row.notes,
     body.description ?? row.description,
@@ -149,7 +171,7 @@ router.patch('/:id', (req: AuthRequest, res) => {
     body.lastOpenedAt !== undefined ? body.lastOpenedAt : row.last_opened_at,
     id, userId,
   )
-  const updated = db.prepare('SELECT * FROM sites WHERE id = ?').get(id) as SiteRow
+  const updated = db.prepare('SELECT * FROM sites WHERE id = ? AND user_id = ?').get(id, userId) as SiteRow
   res.json(rowToSite(updated))
 })
 
