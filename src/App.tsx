@@ -38,6 +38,7 @@ import {
 } from './api'
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:3001'
+const ICP_BEIAN = (import.meta.env.VITE_ICP_BEIAN as string | undefined)?.trim() || ''
 
 /** 判断是否已配置后端（存有 token） */
 const hasBackend = () => Boolean(localStorage.getItem('myNavToken'))
@@ -4814,6 +4815,14 @@ function App() {
           </div>
         </div>
       )}
+
+      {ICP_BEIAN ? (
+        <footer className="site-footer" role="contentinfo">
+          <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">
+            {ICP_BEIAN}
+          </a>
+        </footer>
+      ) : null}
 
       {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
     </div>
